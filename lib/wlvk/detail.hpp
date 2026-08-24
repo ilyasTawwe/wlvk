@@ -22,7 +22,7 @@ namespace wlvk::detail {
 void check_vk(VkResult result, const char* what);
 
 constexpr const char* kValidationLayer = "VK_LAYER_KHRONOS_validation";
-extern const char* const kRequiredDeviceExts[5];
+extern const char* const kRequiredDeviceExts[4];
 
 #define WLVK_TRACE(impl, msg) do { if ((impl).config_.log != nullptr) (impl).log(msg); } while (false)
 
@@ -204,6 +204,7 @@ struct Impl : Callbacks {
     VmaPool dmabuf_pool_ = nullptr;
     VkExportMemoryAllocateInfo dmabuf_export_{};
     VkQueue queue_ = VK_NULL_HANDLE;
+    bool budget_ext_ = false;  // VK_EXT_memory_budget advertised by the device
 
     std::vector<FrameSlot> frames_;
     std::vector<FrameSlot> retired_;

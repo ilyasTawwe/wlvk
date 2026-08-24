@@ -48,8 +48,9 @@ and silently skipped when the compositor lacks xdg-decoration or overrides it.
   Both are hard requirements; the library refuses to start without them
   rather than silently falling back to a copy or tearing path.
 - A Vulkan 1.4 driver exposing `VK_EXT_image_drm_format_modifier`,
-  `VK_EXT_external_memory_dma_buf`, and the external semaphore/fence fd
-  extensions (checked per-device during selection).
+  `VK_EXT_external_memory_dma_buf`, and the external memory/fence fd
+  extensions (checked per-device during selection). `VK_EXT_memory_budget`
+  is enabled when the driver offers it.
 - Build: CMake ≥ 4.0, a C++26 compiler (GCC 14+ tested), plus system
   packages for `wayland-client`, `libdrm`, `wayland-protocols`,
   `wayland-scanner`, and [volk](https://github.com/zeux/volk) (headers + `volk.c`).

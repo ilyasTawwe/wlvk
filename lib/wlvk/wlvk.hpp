@@ -46,7 +46,7 @@ struct FormatOffer {
 
 /// A physical device that satisfies the library's minimum requirements:
 /// a graphics family, Wayland present support, and all device extensions
-/// the library needs (external memory/fence/semaphore fd + drm modifiers).
+/// the library needs (external memory/fence fd + drm modifiers).
 struct DeviceCandidate {
     VkPhysicalDevice device = VK_NULL_HANDLE;
     const VkPhysicalDeviceProperties* properties = nullptr;

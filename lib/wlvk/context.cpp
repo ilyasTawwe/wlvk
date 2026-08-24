@@ -22,8 +22,7 @@ void check_vk(VkResult result, const char* what) {
     }
 }
 
-const char* const kRequiredDeviceExts[5] = {
-    "VK_KHR_external_semaphore_fd",
+const char* const kRequiredDeviceExts[4] = {
     "VK_KHR_external_memory_fd",
     "VK_EXT_external_memory_dma_buf",
     "VK_KHR_external_fence_fd",
@@ -258,7 +257,7 @@ void Impl::pick_physical_device() {
     }
 
     if (capable.empty()) {
-        fail("no device with graphics+present and external memory/semaphore support");
+        fail("no device with graphics+present and external memory/fence support");
     }
 
     std::vector<DeviceCandidate> candidates(capable.size());
@@ -281,6 +280,13 @@ void Impl::pick_physical_device() {
     graphics_family_ = capable[chosen_index].graphics_family;
     present_family_ = capable[chosen_index].present_family;
     gpu_name_ = capable[chosen_index].props.deviceName;
+
+    for (const auto& ext : capable[chosen_index].extensions) {
+        if (std::strcmp(ext.extensionName, VK_EXT_MEMORY_BUDGET_EXTENSION_NAME) == 0) {
+            budget_ext_ = true;
+            break;
+        }
+    }
 }
 
 void Impl::query_default_feedback() {
@@ -349,6 +355,9 @@ void Impl::resolve_format() {
 void Impl::create_device() {
     std::vector<const char*> extensions(std::begin(kRequiredDeviceExts),
                                         std::end(kRequiredDeviceExts));
+    if (budget_ext_) {
+        extensions.push_back(VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
+    }
     void* pnext_head = nullptr;
     DeviceBuilder builder(physical_device_, &extensions, &pnext_head);
     if (config_.configure_device != nullptr) {
@@ -387,6 +396,10 @@ void Impl::create_device() {
 
 void Impl::create_allocator() {
     VmaAllocatorCreateInfo info = {};
+    info.flags = VMA_ALLOCATOR_CREATE_KHR_DEDICATED_ALLOCATION_BIT;
+    if (budget_ext_) {
+        info.flags |= VMA_ALLOCATOR_CREATE_EXT_MEMORY_BUDGET_BIT;
+    }
     info.instance = instance_;
     info.physicalDevice = physical_device_;
     info.device = device_;
