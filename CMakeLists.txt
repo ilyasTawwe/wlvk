@@ -30,6 +30,7 @@ set(GENERATED_SOURCES "")
 foreach(PROTOCOL_XML
         "${WAYLAND_PROTOCOLS_DIR}/stable/xdg-shell/xdg-shell.xml"
         "${WAYLAND_PROTOCOLS_DIR}/stable/linux-dmabuf/linux-dmabuf-v1.xml"
+        "${WAYLAND_PROTOCOLS_DIR}/stable/presentation-time/presentation-time.xml"
         "${WAYLAND_PROTOCOLS_DIR}/staging/linux-drm-syncobj/linux-drm-syncobj-v1.xml")
     if(NOT EXISTS "${PROTOCOL_XML}")
         message(FATAL_ERROR "protocol not found at ${PROTOCOL_XML}")

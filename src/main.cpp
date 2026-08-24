@@ -1,7 +1,9 @@
 #include <algorithm>
+#include <atomic>
 #include <cerrno>
 #include <chrono>
 #include <cmath>
+#include <csignal>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
@@ -22,6 +24,7 @@
 #include <vk_mem_alloc.h>
 #include "xdg-shell-client-protocol.h"
 #include "linux-dmabuf-v1-client-protocol.h"
+#include "presentation-time-client-protocol.h"
 #include "linux-drm-syncobj-v1-client-protocol.h"
 
 namespace {
@@ -37,6 +40,21 @@ void check(VkResult result, const char* what) {
 }
 
 const bool g_trace = std::getenv("CODOTAKU_TRACE") != nullptr;
+const bool g_present_verbose = std::getenv("CODOTAKU_PRESENT") != nullptr;
+
+std::atomic<bool> g_shutdown{false};
+
+void handle_signal(int) {
+    g_shutdown.store(true, std::memory_order_relaxed);
+}
+
+void install_signal_handlers() {
+    struct sigaction sa = {};
+    sa.sa_handler = &handle_signal;
+    sigemptyset(&sa.sa_mask);
+    sigaction(SIGINT, &sa, nullptr);
+    sigaction(SIGTERM, &sa, nullptr);
+}
 
 void trace(const std::string& message) {
     if (g_trace) {
@@ -62,6 +80,15 @@ void hsv_to_rgb(float h, float s, float v, float out[3]) {
     }
 }
 
+struct PresentStats {
+    uint64_t presented = 0;
+    uint64_t discarded = 0;
+    uint64_t late = 0;
+    int64_t last_tv_ns = 0;
+    int64_t min_gap_ns = 0;
+    int64_t max_gap_ns = 0;
+};
+
 struct Framebuffer {
     VkImage image = VK_NULL_HANDLE;
     VmaAllocation allocation = nullptr;
@@ -77,6 +104,7 @@ struct Framebuffer {
     wp_linux_drm_syncobj_timeline_v1* wl_release_timeline = nullptr;
     uint64_t counter = 0;
     bool released = false;
+    struct wp_presentation_feedback* present_feedback = nullptr;
 };
 
 class Application {
@@ -116,6 +144,14 @@ private:
                                          wl_array* indices);
     static void feedback_tranche_flags(void*, zwp_linux_dmabuf_feedback_v1*, uint32_t) {}
 
+    static void presentation_sync_output(void*, struct wp_presentation_feedback*,
+                                         wl_output*) {}
+    static void presentation_presented(void* data, struct wp_presentation_feedback*,
+                                       uint32_t, uint32_t, uint32_t, uint32_t, uint32_t,
+                                       uint32_t, uint32_t);
+    static void presentation_discarded(void* data, struct wp_presentation_feedback*);
+    void print_presentation_summary() const;
+
     static VKAPI_ATTR VkBool32 VKAPI_CALL debug_callback(
         VkDebugUtilsMessageSeverityFlagBitsEXT severity,
         VkDebugUtilsMessageTypeFlagsEXT types,
@@ -139,6 +175,11 @@ private:
     };
     static constexpr wl_callback_listener frame_listener_ = {
         .done = &frame_done,
+    };
+    static constexpr struct wp_presentation_feedback_listener presentation_listener_ = {
+        .sync_output = &presentation_sync_output,
+        .presented = &presentation_presented,
+        .discarded = &presentation_discarded,
     };
     static constexpr zwp_linux_dmabuf_v1_listener dmabuf_listener_ = {
         .format = &dmabuf_format,
@@ -194,6 +235,7 @@ private:
     wp_linux_drm_syncobj_manager_v1* syncobj_manager_ = nullptr;
     wp_linux_drm_syncobj_surface_v1* syncobj_surface_ = nullptr;
     zwp_linux_dmabuf_feedback_v1* default_feedback_ = nullptr;
+    wp_presentation* presentation_ = nullptr;
 
     std::vector<uint8_t> format_table_;
     std::vector<std::pair<uint32_t, uint64_t>> tranche_candidates_;
@@ -201,6 +243,7 @@ private:
     uint64_t chosen_modifier_ = 0;
     std::vector<uint64_t> supported_modifiers_;
     dev_t main_device_ = 0;
+    PresentStats present_stats_;
 
     int drm_fd_ = -1;
 
@@ -258,6 +301,11 @@ void Application::registry_global(void* data, wl_registry* registry, uint32_t na
                && self->syncobj_manager_ == nullptr) {
         self->syncobj_manager_ = static_cast<wp_linux_drm_syncobj_manager_v1*>(
             wl_registry_bind(registry, name, &wp_linux_drm_syncobj_manager_v1_interface, 1));
+    } else if (std::strcmp(interface, "wp_presentation") == 0
+               && self->presentation_ == nullptr) {
+        self->presentation_ = static_cast<wp_presentation*>(
+            wl_registry_bind(registry, name, &wp_presentation_interface,
+                             version < 1 ? version : 1));
     }
 }
 
@@ -314,6 +362,7 @@ Application::Application() {
 }
 
 Application::~Application() {
+    print_presentation_summary();
     if (device_ != VK_NULL_HANDLE) {
         vkDeviceWaitIdle(device_);
     }
@@ -867,6 +916,9 @@ void Application::handle_resize() {
         retired.counter = old.counter;
         retired_.push_back(retired);
 
+        if (old.present_feedback != nullptr) {
+            old.present_feedback = nullptr;
+        }
         old.image = VK_NULL_HANDLE;
         old.allocation = nullptr;
         old.dma_buf_fd = -1;
@@ -1072,6 +1124,71 @@ void Application::feedback_tranche_done(void* data, zwp_linux_dmabuf_feedback_v1
     self->tranche_candidates_.clear();
 }
 
+void Application::presentation_presented(void* data, struct wp_presentation_feedback* pfb,
+                                         uint32_t tv_sec_hi, uint32_t tv_sec_lo,
+                                         uint32_t tv_nsec, uint32_t refresh, uint32_t seq_hi,
+                                         uint32_t seq_lo, uint32_t) {
+    auto* self = static_cast<Application*>(data);
+    PresentStats& s = self->present_stats_;
+    const int64_t tv_ns =
+        ((static_cast<int64_t>(tv_sec_hi) << 32) | static_cast<int64_t>(tv_sec_lo))
+            * 1000000000LL
+        + tv_nsec;
+    if (s.last_tv_ns != 0) {
+        const int64_t gap = tv_ns - s.last_tv_ns;
+        if (s.min_gap_ns == 0 || gap < s.min_gap_ns) {
+            s.min_gap_ns = gap;
+        }
+        if (gap > s.max_gap_ns) {
+            s.max_gap_ns = gap;
+        }
+        if (refresh > 0 && gap > static_cast<int64_t>(refresh) * 3 / 2) {
+            ++s.late;
+        }
+    }
+    s.last_tv_ns = tv_ns;
+    ++s.presented;
+    if (g_present_verbose) {
+        std::fprintf(stderr, "present seq=%llu tv=%lldms\n",
+                     static_cast<unsigned long long>(
+                         (static_cast<uint64_t>(seq_hi) << 32) | seq_lo),
+                     static_cast<long long>(tv_ns / 1000000));
+    }
+    for (auto& f : self->frames_) {
+        if (f.present_feedback == pfb) {
+            f.present_feedback = nullptr;
+            break;
+        }
+    }
+    wp_presentation_feedback_destroy(pfb);
+}
+
+void Application::presentation_discarded(void* data, struct wp_presentation_feedback* pfb) {
+    auto* self = static_cast<Application*>(data);
+    ++self->present_stats_.discarded;
+    for (auto& f : self->frames_) {
+        if (f.present_feedback == pfb) {
+            f.present_feedback = nullptr;
+            break;
+        }
+    }
+    wp_presentation_feedback_destroy(pfb);
+}
+
+void Application::print_presentation_summary() const {
+    const PresentStats& s = present_stats_;
+    if (s.presented == 0 && s.discarded == 0) {
+        return;
+    }
+    std::fprintf(stderr,
+                 "codotaku-media: presented=%llu discarded=%llu late=%llu"
+                 " present-gap[min,max]=[%.2f,%.2f]ms\n",
+                 static_cast<unsigned long long>(s.presented),
+                 static_cast<unsigned long long>(s.discarded),
+                 static_cast<unsigned long long>(s.late),
+                 s.min_gap_ns / 1e6, s.max_gap_ns / 1e6);
+}
+
 void Application::query_default_feedback() {
     default_feedback_ = zwp_linux_dmabuf_v1_get_default_feedback(dmabuf_);
     if (default_feedback_ == nullptr) {
@@ -1209,6 +1326,14 @@ void Application::present(uint32_t index, float r, float g, float b) {
     wp_linux_drm_syncobj_surface_v1_set_release_point(syncobj_surface_,
                                                       fb.wl_release_timeline, 0, point);
 
+    if (presentation_ != nullptr) {
+        fb.present_feedback = wp_presentation_feedback(presentation_, surface_);
+        if (fb.present_feedback != nullptr) {
+            wp_presentation_feedback_add_listener(fb.present_feedback,
+                                                  &presentation_listener_, this);
+        }
+    }
+
     wl_surface_attach(surface_, fb.buffer, 0, 0);
     wl_surface_damage_buffer(surface_, 0, 0, INT32_MAX, INT32_MAX);
     wl_surface_commit(surface_);
@@ -1230,7 +1355,7 @@ void Application::run() {
     const bool resize_test = std::getenv("CODOTAKU_RESIZE_TEST") != nullptr;
     int resize_test_step = 0;
 
-    while (!closed_) {
+    while (!closed_ && !g_shutdown.load(std::memory_order_relaxed)) {
         poll_and_dispatch();
         if (!frame_due_ && !resize_pending_) {
             continue;
@@ -1277,6 +1402,7 @@ void Application::run() {
 } // namespace
 
 int main() {
+    install_signal_handlers();
     try {
         Application app;
         app.run();
