@@ -20,30 +20,38 @@ find_path(VOLK_INCLUDE_DIR NAMES volk.h REQUIRED)
 find_file(VOLK_SOURCE NAMES volk.c PATHS "${VOLK_INCLUDE_DIR}" REQUIRED)
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(WAYLAND_CLIENT REQUIRED IMPORTED_TARGET wayland-client)
+pkg_check_modules(LIBDRM REQUIRED IMPORTED_TARGET libdrm)
 pkg_get_variable(WAYLAND_PROTOCOLS_DIR wayland-protocols pkgdatadir)
 find_program(WAYLAND_SCANNER NAMES wayland-scanner REQUIRED)
 
-set(XDG_SHELL_XML "${WAYLAND_PROTOCOLS_DIR}/stable/xdg-shell/xdg-shell.xml")
-if(NOT EXISTS "${XDG_SHELL_XML}")
-    message(FATAL_ERROR "xdg-shell.xml not found at ${XDG_SHELL_XML}")
-endif()
-
 set(GENERATED_DIR "${CMAKE_CURRENT_BINARY_DIR}/generated")
-set(XDG_SHELL_HEADER "${GENERATED_DIR}/xdg-shell-client-protocol.h")
-set(XDG_SHELL_CODE "${GENERATED_DIR}/xdg-shell-protocol.c")
 
-add_custom_command(
-    OUTPUT "${XDG_SHELL_HEADER}"
-    COMMAND "${WAYLAND_SCANNER}" client-header "${XDG_SHELL_XML}" "${XDG_SHELL_HEADER}"
-    DEPENDS "${XDG_SHELL_XML}"
-    VERBATIM
-)
-add_custom_command(
-    OUTPUT "${XDG_SHELL_CODE}"
-    COMMAND "${WAYLAND_SCANNER}" private-code "${XDG_SHELL_XML}" "${XDG_SHELL_CODE}"
-    DEPENDS "${XDG_SHELL_XML}"
-    VERBATIM
-)
+set(GENERATED_SOURCES "")
+foreach(PROTOCOL_XML
+        "${WAYLAND_PROTOCOLS_DIR}/stable/xdg-shell/xdg-shell.xml"
+        "${WAYLAND_PROTOCOLS_DIR}/stable/linux-dmabuf/linux-dmabuf-v1.xml"
+        "${WAYLAND_PROTOCOLS_DIR}/staging/linux-drm-syncobj/linux-drm-syncobj-v1.xml")
+    if(NOT EXISTS "${PROTOCOL_XML}")
+        message(FATAL_ERROR "protocol not found at ${PROTOCOL_XML}")
+    endif()
+    get_filename_component(PROTOCOL_NAME "${PROTOCOL_XML}" NAME_WE)
+    set(PROTOCOL_HEADER "${GENERATED_DIR}/${PROTOCOL_NAME}-client-protocol.h")
+    set(PROTOCOL_CODE "${GENERATED_DIR}/${PROTOCOL_NAME}-protocol.c")
+    add_custom_command(
+        OUTPUT "${PROTOCOL_HEADER}"
+        COMMAND "${WAYLAND_SCANNER}" client-header "${PROTOCOL_XML}" "${PROTOCOL_HEADER}"
+        DEPENDS "${PROTOCOL_XML}"
+        VERBATIM
+    )
+    add_custom_command(
+        OUTPUT "${PROTOCOL_CODE}"
+        COMMAND "${WAYLAND_SCANNER}" private-code "${PROTOCOL_XML}" "${PROTOCOL_CODE}"
+        DEPENDS "${PROTOCOL_XML}"
+        VERBATIM
+    )
+    set_source_files_properties("${PROTOCOL_CODE}" PROPERTIES COMPILE_OPTIONS "-w")
+    list(APPEND GENERATED_SOURCES "${PROTOCOL_HEADER}" "${PROTOCOL_CODE}")
+endforeach()
 
 add_executable(codotaku-media
     src/main.cpp
@@ -51,25 +59,36 @@ add_executable(codotaku-media
     src/renderer_vulkan.cpp
     src/vma_impl.cpp
     "${VOLK_SOURCE}"
-    "${XDG_SHELL_HEADER}"
-    "${XDG_SHELL_CODE}"
+    ${GENERATED_SOURCES}
 )
-set_source_files_properties("${XDG_SHELL_CODE}" PROPERTIES COMPILE_OPTIONS "-w")
 set_source_files_properties(src/vma_impl.cpp PROPERTIES COMPILE_OPTIONS "-w")
 
-target_include_directories(codotaku-media PRIVATE src external "${GENERATED_DIR}" "${VOLK_INCLUDE_DIR}")
-target_link_libraries(codotaku-media PRIVATE
-    PkgConfig::WAYLAND_CLIENT
-    ${CMAKE_DL_LIBS}
+add_executable(spike-dmabuf
+    src/spike_dmabuf.cpp
+    src/vma_impl.cpp
+    "${VOLK_SOURCE}"
+    ${GENERATED_SOURCES}
 )
-target_compile_definitions(codotaku-media PRIVATE
-    VK_NO_PROTOTYPES
-    VK_USE_PLATFORM_WAYLAND_KHR
-)
-if(CODOTAKU_VALIDATION)
-    target_compile_definitions(codotaku-media PRIVATE CODOTAKU_ENABLE_VALIDATION)
-endif()
 
-if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-    target_compile_options(codotaku-media PRIVATE -Wall -Wextra -Wpedantic)
-endif()
+function(codotaku_configure_target target)
+    target_include_directories("${target}" PRIVATE
+        src external "${GENERATED_DIR}" "${VOLK_INCLUDE_DIR}")
+    target_link_libraries("${target}" PRIVATE
+        PkgConfig::WAYLAND_CLIENT
+        ${CMAKE_DL_LIBS}
+    )
+    target_compile_definitions("${target}" PRIVATE
+        VK_NO_PROTOTYPES
+        VK_USE_PLATFORM_WAYLAND_KHR
+    )
+    if(CODOTAKU_VALIDATION)
+        target_compile_definitions("${target}" PRIVATE CODOTAKU_ENABLE_VALIDATION)
+    endif()
+    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+        target_compile_options("${target}" PRIVATE -Wall -Wextra -Wpedantic)
+    endif()
+endfunction()
+
+codotaku_configure_target(codotaku-media)
+codotaku_configure_target(spike-dmabuf)
+target_link_libraries(spike-dmabuf PRIVATE PkgConfig::LIBDRM)
