@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 4.0)
-project(codotaku_media VERSION 0.1.0 LANGUAGES C CXX)
+project(codotaku_media VERSION 0.2.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 26)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -11,8 +11,6 @@ set(CMAKE_C_EXTENSIONS OFF)
 # No C++ modules here; skipping the scan avoids GCC-only flags
 # (-fmodules-ts, -fmodule-mapper, ...) that clangd cannot parse.
 set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
-
-option(CODOTAKU_VALIDATION "Enable Vulkan validation layers" OFF)
 
 # System libvolk.a is built without platform defines, so its WSI entry points
 # are absent; compile volk.c ourselves with VK_USE_PLATFORM_WAYLAND_KHR instead.
@@ -54,32 +52,34 @@ foreach(PROTOCOL_XML
     list(APPEND GENERATED_SOURCES "${PROTOCOL_HEADER}" "${PROTOCOL_CODE}")
 endforeach()
 
-add_executable(codotaku-media
-    src/main.cpp
-    src/vma_impl.cpp
+add_library(wlvk STATIC
+    lib/wlvk/context.cpp
+    lib/wlvk/window.cpp
+    lib/wlvk/vma_impl.cpp
     "${VOLK_SOURCE}"
     ${GENERATED_SOURCES}
 )
-set_source_files_properties(src/vma_impl.cpp PROPERTIES COMPILE_OPTIONS "-w")
+set_source_files_properties(lib/wlvk/vma_impl.cpp PROPERTIES COMPILE_OPTIONS "-w")
 
 function(codotaku_configure_target target)
-    target_include_directories("${target}" PRIVATE
-        src external "${GENERATED_DIR}" "${VOLK_INCLUDE_DIR}")
-    target_link_libraries("${target}" PRIVATE
-        PkgConfig::WAYLAND_CLIENT
-        ${CMAKE_DL_LIBS}
-    )
     target_compile_definitions("${target}" PRIVATE
         VK_NO_PROTOTYPES
         VK_USE_PLATFORM_WAYLAND_KHR
     )
-    if(CODOTAKU_VALIDATION)
-        target_compile_definitions("${target}" PRIVATE CODOTAKU_ENABLE_VALIDATION)
-    endif()
     if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         target_compile_options("${target}" PRIVATE -Wall -Wextra -Wpedantic)
     endif()
 endfunction()
 
+codotaku_configure_target(wlvk)
+target_include_directories(wlvk PUBLIC
+    lib external "${GENERATED_DIR}" "${VOLK_INCLUDE_DIR}")
+target_link_libraries(wlvk PUBLIC
+    PkgConfig::WAYLAND_CLIENT
+    PkgConfig::LIBDRM
+    ${CMAKE_DL_LIBS}
+)
+
+add_executable(codotaku-media src/main.cpp)
 codotaku_configure_target(codotaku-media)
-target_link_libraries(codotaku-media PRIVATE PkgConfig::LIBDRM)
+target_link_libraries(codotaku-media PRIVATE wlvk)
