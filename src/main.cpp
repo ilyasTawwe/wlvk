@@ -9,12 +9,14 @@
 #include <poll.h>
 #include <stdexcept>
 #include <string>
+#include <sys/stat.h>
 #include <vector>
 
 #include <unistd.h>
 
 #include <wayland-client.h>
 #include <xf86drm.h>
+#include <drm_fourcc.h>
 #include <volk.h>
 #include <vk_mem_alloc.h>
 #include "xdg-shell-client-protocol.h"
@@ -24,7 +26,6 @@
 namespace {
 
 constexpr uint32_t BUFFER_COUNT = 3;
-constexpr uint32_t DRM_FORMAT_XRGB8888 = 0x34325258u; // 'X','R','2','4'
 constexpr const char* VALIDATION_LAYER = "VK_LAYER_KHRONOS_validation";
 
 void check(VkResult result, const char* what) {
@@ -105,7 +106,8 @@ private:
     static void feedback_done(void*, zwp_linux_dmabuf_feedback_v1*) {}
     static void feedback_format_table(void* data, zwp_linux_dmabuf_feedback_v1*, int32_t fd,
                                       uint32_t size);
-    static void feedback_main_device(void*, zwp_linux_dmabuf_feedback_v1*, wl_array*) {}
+    static void feedback_main_device(void* data, zwp_linux_dmabuf_feedback_v1*,
+                                     wl_array* device);
     static void feedback_tranche_done(void* data, zwp_linux_dmabuf_feedback_v1*);
     static void feedback_tranche_target_device(void*, zwp_linux_dmabuf_feedback_v1*,
                                                wl_array*) {}
@@ -195,6 +197,7 @@ private:
     std::vector<std::pair<uint32_t, uint64_t>> tranche_candidates_;
     std::vector<std::pair<uint32_t, uint64_t>> feedback_formats_;
     uint64_t chosen_modifier_ = 0;
+    dev_t main_device_ = 0;
 
     int drm_fd_ = -1;
 
@@ -917,9 +920,44 @@ void Application::init_vulkan() {
 }
 
 void Application::open_drm_node() {
-    drm_fd_ = ::open("/dev/dri/renderD128", O_RDWR | O_CLOEXEC);
+    if (main_device_ != 0) {
+        drmDevicePtr devices[16] = {};
+        const int count = drmGetDevices2(0, devices, 16);
+        for (int i = 0; i < count; ++i) {
+            const drmDevicePtr dev = devices[i];
+            const char* matched = nullptr;
+            for (int t = 0; t < DRM_NODE_MAX && matched == nullptr; ++t) {
+                if ((dev->available_nodes & (1u << t)) == 0) {
+                    continue;
+                }
+                struct stat st = {};
+                if (::stat(dev->nodes[t], &st) == 0 && st.st_rdev == main_device_) {
+                    matched = dev->nodes[t];
+                }
+            }
+            if (matched == nullptr) {
+                continue;
+            }
+            const bool have_render = (dev->available_nodes & (1u << DRM_NODE_RENDER)) != 0;
+            const char* node = have_render ? dev->nodes[DRM_NODE_RENDER] : matched;
+            drm_fd_ = ::open(node, O_RDWR | O_CLOEXEC);
+            if (drm_fd_ >= 0) {
+                TRACE(std::string("opened drm node ") + node + " (matched "
+                      + matched + " via dmabuf main_device)");
+                break;
+            }
+        }
+        if (count > 0) {
+            drmFreeDevices(devices, count);
+        }
+    }
     if (drm_fd_ < 0) {
-        throw std::runtime_error("failed to open DRM render node /dev/dri/renderD128");
+        TRACE(main_device_ != 0 ? "no drm device matched main_device; using fallback node"
+                                : "main_device unknown; using fallback node");
+        drm_fd_ = ::open("/dev/dri/renderD128", O_RDWR | O_CLOEXEC);
+    }
+    if (drm_fd_ < 0) {
+        throw std::runtime_error("failed to open a usable DRM render node");
     }
 }
 
@@ -977,9 +1015,19 @@ bool Application::wait_release_point(uint32_t syncobj, uint64_t point, int64_t t
     return true;
 }
 
-void Application::feedback_format_table(void* data, zwp_linux_dmabuf_feedback_v1*, int32_t fd,
-                                  uint32_t size) {
+void Application::feedback_main_device(void* data, zwp_linux_dmabuf_feedback_v1*,
+                                       wl_array* device) {
     auto* self = static_cast<Application*>(data);
+    if (device->size >= sizeof(dev_t)) {
+        std::memcpy(&self->main_device_, device->data, sizeof(dev_t));
+        char hex[32];
+        std::snprintf(hex, sizeof(hex), "%lx", static_cast<unsigned long>(self->main_device_));
+        TRACE(std::string("dmabuf main_device dev_t=0x") + hex);
+    }
+}
+
+void Application::feedback_format_table(void* data, zwp_linux_dmabuf_feedback_v1*, int32_t fd,
+                                  uint32_t size) {    auto* self = static_cast<Application*>(data);
     self->format_table_.resize(size);
     ssize_t total = 0;
     while (total < static_cast<ssize_t>(size)) {
@@ -1037,8 +1085,8 @@ void Application::choose_modifier() {
         throw std::runtime_error("compositor feedback offers no XRGB8888 dmabuf formats");
     }
     for (const auto& [format, modifier] : feedback_formats_) {
-        if (modifier == 0) {
-            chosen_modifier_ = 0;
+        if (modifier == DRM_FORMAT_MOD_LINEAR) {
+            chosen_modifier_ = DRM_FORMAT_MOD_LINEAR;
             TRACE("chosen modifier: LINEAR (preferred)");
             return;
         }
