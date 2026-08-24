@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cerrno>
 #include <chrono>
 #include <cmath>
@@ -159,6 +160,7 @@ private:
     void poll_and_dispatch();
     void arm_frame();
     void query_default_feedback();
+    void query_supported_modifiers();
     void choose_modifier();
 
     void init_vulkan();
@@ -197,6 +199,7 @@ private:
     std::vector<std::pair<uint32_t, uint64_t>> tranche_candidates_;
     std::vector<std::pair<uint32_t, uint64_t>> feedback_formats_;
     uint64_t chosen_modifier_ = 0;
+    std::vector<uint64_t> supported_modifiers_;
     dev_t main_device_ = 0;
 
     int drm_fd_ = -1;
@@ -438,7 +441,6 @@ void Application::init_wayland() {
     }
     width_ = pending_width_ ? pending_width_ : 1280;
     height_ = pending_height_ ? pending_height_ : 720;
-    query_default_feedback();
 }
 
 void Application::create_window() {
@@ -913,6 +915,8 @@ void Application::init_vulkan() {
     check(volkInitialize(), "volkInitialize");
     create_instance();
     pick_physical_device();
+    query_supported_modifiers();
+    query_default_feedback();
     create_device();
     create_allocator();
     open_drm_node();
@@ -1080,20 +1084,51 @@ void Application::query_default_feedback() {
     choose_modifier();
 }
 
+void Application::query_supported_modifiers() {
+    VkDrmFormatModifierPropertiesListEXT mod_list = {};
+    mod_list.sType = VK_STRUCTURE_TYPE_DRM_FORMAT_MODIFIER_PROPERTIES_LIST_EXT;
+
+    VkFormatProperties2 props = {};
+    props.sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2;
+    props.pNext = &mod_list;
+    vkGetPhysicalDeviceFormatProperties2(physical_device_, VK_FORMAT_B8G8R8A8_UNORM, &props);
+
+    if (mod_list.drmFormatModifierCount == 0) {
+        TRACE("driver reports no DRM format modifiers; accepting compositor choice blindly");
+        return;
+    }
+    std::vector<VkDrmFormatModifierPropertiesEXT> mods(mod_list.drmFormatModifierCount);
+    mod_list.pDrmFormatModifierProperties = mods.data();
+    vkGetPhysicalDeviceFormatProperties2(physical_device_, VK_FORMAT_B8G8R8A8_UNORM, &props);
+
+    for (const auto& m : mods) {
+        if ((m.drmFormatModifierTilingFeatures & VK_FORMAT_FEATURE_TRANSFER_DST_BIT) != 0) {
+            supported_modifiers_.push_back(m.drmFormatModifier);
+        }
+    }
+}
+
 void Application::choose_modifier() {
     if (feedback_formats_.empty()) {
         throw std::runtime_error("compositor feedback offers no XRGB8888 dmabuf formats");
     }
-    for (const auto& [format, modifier] : feedback_formats_) {
-        if (modifier == DRM_FORMAT_MOD_LINEAR) {
-            chosen_modifier_ = DRM_FORMAT_MOD_LINEAR;
-            TRACE("chosen modifier: LINEAR (preferred)");
-            return;
+    for (size_t i = 0; i < feedback_formats_.size(); ++i) {
+        const uint64_t modifier = feedback_formats_[i].second;
+        if (!supported_modifiers_.empty()
+            && std::find(supported_modifiers_.begin(), supported_modifiers_.end(), modifier)
+                   == supported_modifiers_.end()) {
+            continue;
         }
+        chosen_modifier_ = modifier;
+        char hex[32];
+        std::snprintf(hex, sizeof(hex), "%llx", static_cast<unsigned long long>(modifier));
+        const std::string rank = i == 0
+                                     ? " (compositor top pick)"
+                                     : " (rank " + std::to_string(i) + " in feedback order)";
+        TRACE(std::string("chosen modifier 0x") + hex + rank);
+        return;
     }
-    chosen_modifier_ = feedback_formats_.front().second;
-    std::fprintf(stderr, "codotaku-media: LINEAR unavailable; falling back to modifier 0x%016llx\n",
-                 static_cast<unsigned long long>(chosen_modifier_));
+    throw std::runtime_error("no compositor-offered modifier is Vulkan-supported");
 }
 
 void Application::record_clear(uint32_t index, float r, float g, float b) {
