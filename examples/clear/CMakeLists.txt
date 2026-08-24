@@ -1,0 +1,5 @@
+add_executable(wlvk-clear main.cpp)
+target_link_libraries(wlvk-clear PRIVATE wlvk)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(wlvk-clear PRIVATE -Wall -Wextra -Wpedantic)
+endif()

@@ -95,17 +95,17 @@ int main() {
     install_signal_handlers();
 
     wlvk::WindowConfig config;
-    config.title = "codotaku-media";
-    config.app_id = "codotaku-media";
-    if (std::getenv("CODOTAKU_VALIDATION") != nullptr) {
+    config.title = "wlvk-clear";
+    config.app_id = "wlvk-clear";
+    if (std::getenv("WLVK_VALIDATION") != nullptr) {
         config.enable_validation = true;
     }
-    if (std::getenv("CODOTAKU_TRACE") != nullptr) {
+    if (std::getenv("WLVK_TRACE") != nullptr) {
         config.log = [](std::string_view msg) {
             std::fprintf(stderr, "trace: %.*s\n", static_cast<int>(msg.size()), msg.data());
         };
     }
-    if (std::getenv("CODOTAKU_PRESENT") != nullptr) {
+    if (std::getenv("WLVK_PRESENT_STATS") != nullptr) {
         config.on_present = [](const wlvk::Stats& stats) {
             std::fprintf(stderr, "presented=%llu discarded=%llu late=%llu\n",
                          static_cast<unsigned long long>(stats.presented),
@@ -119,7 +119,7 @@ int main() {
 
         VkPhysicalDeviceProperties props = {};
         vkGetPhysicalDeviceProperties(win.physical_device(), &props);
-        std::printf("codotaku-media: %ux%u, gpu: %s\n", win.width(), win.height(),
+        std::printf("wlvk-clear: %ux%u, gpu: %s\n", win.width(), win.height(),
                     props.deviceName);
 
         VkCommandPool command_pool = VK_NULL_HANDLE;
@@ -140,7 +140,7 @@ int main() {
            "vkAllocateCommandBuffers");
 
         const auto start = std::chrono::steady_clock::now();
-        const bool resize_test = std::getenv("CODOTAKU_RESIZE_TEST") != nullptr;
+        const bool resize_test = std::getenv("WLVK_RESIZE_TEST") != nullptr;
         int resize_test_step = 0;
 
         wlvk::Frame frame;
@@ -190,7 +190,7 @@ int main() {
         const wlvk::Stats stats = win.present_stats();
         if (stats.presented != 0 || stats.discarded != 0) {
             std::fprintf(stderr,
-                         "codotaku-media: presented=%llu discarded=%llu late=%llu"
+                         "wlvk-clear: presented=%llu discarded=%llu late=%llu"
                          " present-gap[min,max]=[%.2f,%.2f]ms\n",
                          static_cast<unsigned long long>(stats.presented),
                          static_cast<unsigned long long>(stats.discarded),
