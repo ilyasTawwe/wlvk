@@ -8,6 +8,7 @@
 
 #include <wayland-client.h>
 #include <volk.h>
+#include <vk_mem_alloc.h>
 
 struct QueueFamilies {
     std::optional<uint32_t> graphics;
@@ -33,9 +34,11 @@ private:
     void create_surface();
     void pick_physical_device();
     void create_device();
+    void create_allocator();
     void create_swapchain(VkSwapchainKHR old_swapchain);
     void create_image_views();
     void create_command_buffers();
+    void allocate_command_buffers();
     void create_sync_objects();
     void recreate_swapchain();
     void record_command_buffer(uint32_t image_index);
@@ -58,6 +61,7 @@ private:
     std::string gpu_name_;
 
     VkDevice device_ = VK_NULL_HANDLE;
+    VmaAllocator allocator_ = nullptr;
     VkQueue graphics_queue_ = VK_NULL_HANDLE;
     VkQueue present_queue_ = VK_NULL_HANDLE;
 

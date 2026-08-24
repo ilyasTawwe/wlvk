@@ -8,6 +8,10 @@ set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_C_EXTENSIONS OFF)
 
+# No C++ modules here; skipping the scan avoids GCC-only flags
+# (-fmodules-ts, -fmodule-mapper, ...) that clangd cannot parse.
+set(CMAKE_CXX_SCAN_FOR_MODULES OFF)
+
 option(CODOTAKU_VALIDATION "Enable Vulkan validation layers" OFF)
 
 # System libvolk.a is built without platform defines, so its WSI entry points
@@ -45,13 +49,15 @@ add_executable(codotaku-media
     src/main.cpp
     src/platform_wayland.cpp
     src/renderer_vulkan.cpp
+    src/vma_impl.cpp
     "${VOLK_SOURCE}"
     "${XDG_SHELL_HEADER}"
     "${XDG_SHELL_CODE}"
 )
 set_source_files_properties("${XDG_SHELL_CODE}" PROPERTIES COMPILE_OPTIONS "-w")
+set_source_files_properties(src/vma_impl.cpp PROPERTIES COMPILE_OPTIONS "-w")
 
-target_include_directories(codotaku-media PRIVATE src "${GENERATED_DIR}" "${VOLK_INCLUDE_DIR}")
+target_include_directories(codotaku-media PRIVATE src external "${GENERATED_DIR}" "${VOLK_INCLUDE_DIR}")
 target_link_libraries(codotaku-media PRIVATE
     PkgConfig::WAYLAND_CLIENT
     ${CMAKE_DL_LIBS}

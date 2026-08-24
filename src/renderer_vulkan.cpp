@@ -28,6 +28,9 @@ void trace(const std::string& message) {
     }
 }
 
+// Lazy guard so argument string building only happens when tracing is on.
+#define TRACE(msg) do { if (g_trace) trace(msg); } while (false)
+
 // h in [0,1), s and v in [0,1].
 void hsv_to_rgb(float h, float s, float v, float out[3]) {
     const float sector = std::floor(h * 6.0f);
@@ -56,15 +59,37 @@ Renderer::Renderer(wl_display* display, wl_surface* surface, uint32_t width, uin
     create_surface();
     pick_physical_device();
     create_device();
+    create_allocator();
     create_swapchain(VK_NULL_HANDLE);
     create_image_views();
     create_command_buffers();
     create_sync_objects();
 
+    VkBufferCreateInfo buffer_info = {};
+    buffer_info.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO;
+    buffer_info.size = 64 * 1024;
+    buffer_info.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+
+    VmaAllocationCreateInfo alloc_info = {};
+    alloc_info.flags = VMA_ALLOCATION_CREATE_HOST_ACCESS_SEQUENTIAL_WRITE_BIT
+                       | VMA_ALLOCATION_CREATE_MAPPED_BIT;
+    alloc_info.usage = VMA_MEMORY_USAGE_AUTO;
+
+    VkBuffer buffer = VK_NULL_HANDLE;
+    VmaAllocation allocation = nullptr;
+    VmaAllocationInfo allocation_result = {};
+    check(vmaCreateBuffer(allocator_, &buffer_info, &alloc_info, &buffer, &allocation,
+                          &allocation_result),
+          "vmaCreateBuffer");
+    TRACE(std::string("vma smoke test: mapped=")
+          + (allocation_result.pMappedData != nullptr ? "ok" : "null"));
+    vmaDestroyBuffer(allocator_, buffer, allocation);
+
     std::printf("gpu: %s\n", gpu_name_.c_str());
 }
 
 Renderer::~Renderer() {
+    // Not a destroy command: VK_NULL_HANDLE is invalid usage here.
     if (device_ != VK_NULL_HANDLE) {
         vkDeviceWaitIdle(device_);
     }
@@ -77,27 +102,17 @@ Renderer::~Renderer() {
     for (VkFence fence : in_flight_fences_) {
         vkDestroyFence(device_, fence, nullptr);
     }
-    if (command_pool_ != VK_NULL_HANDLE) {
-        vkDestroyCommandPool(device_, command_pool_, nullptr);
-    }
+    // Destroy commands are spec-guaranteed no-ops for VK_NULL_HANDLE.
+    vkDestroyCommandPool(device_, command_pool_, nullptr);
     for (VkImageView view : swapchain_views_) {
         vkDestroyImageView(device_, view, nullptr);
     }
-    if (swapchain_ != VK_NULL_HANDLE) {
-        vkDestroySwapchainKHR(device_, swapchain_, nullptr);
-    }
-    if (device_ != VK_NULL_HANDLE) {
-        vkDestroyDevice(device_, nullptr);
-    }
-    if (surface_ != VK_NULL_HANDLE) {
-        vkDestroySurfaceKHR(instance_, surface_, nullptr);
-    }
-    if (debug_messenger_ != VK_NULL_HANDLE) {
-        vkDestroyDebugUtilsMessengerEXT(instance_, debug_messenger_, nullptr);
-    }
-    if (instance_ != VK_NULL_HANDLE) {
-        vkDestroyInstance(instance_, nullptr);
-    }
+    vkDestroySwapchainKHR(device_, swapchain_, nullptr);
+    vmaDestroyAllocator(allocator_);
+    vkDestroyDevice(device_, nullptr);
+    vkDestroySurfaceKHR(instance_, surface_, nullptr);
+    vkDestroyDebugUtilsMessengerEXT(instance_, debug_messenger_, nullptr);
+    vkDestroyInstance(instance_, nullptr);
 }
 
 void Renderer::create_instance() {
@@ -208,13 +223,28 @@ void Renderer::pick_physical_device() {
         VkPhysicalDeviceProperties props = {};
         vkGetPhysicalDeviceProperties(candidate, &props);
 
+        uint32_t extension_count = 0;
+        check(vkEnumerateDeviceExtensionProperties(candidate, nullptr, &extension_count, nullptr),
+              "vkEnumerateDeviceExtensionProperties");
+        std::vector<VkExtensionProperties> extensions(extension_count);
+        check(vkEnumerateDeviceExtensionProperties(candidate, nullptr, &extension_count,
+                                                   extensions.data()),
+              "vkEnumerateDeviceExtensionProperties");
+        const bool has_swapchain = std::any_of(
+            extensions.begin(), extensions.end(), [](const VkExtensionProperties& extension) {
+                return std::strcmp(extension.extensionName, "VK_KHR_swapchain") == 0;
+            });
+        if (!has_swapchain) {
+            continue;
+        }
+
         uint32_t family_count = 0;
         vkGetPhysicalDeviceQueueFamilyProperties(candidate, &family_count, nullptr);
         std::vector<VkQueueFamilyProperties> families(family_count);
         vkGetPhysicalDeviceQueueFamilyProperties(candidate, &family_count, families.data());
 
         QueueFamilies indices;
-        for (uint32_t i = 0; i < family_count; ++i) {
+        for (uint32_t i = 0; i < family_count && !indices.complete(); ++i) {
             if ((families[i].queueFlags & VK_QUEUE_GRAPHICS_BIT) != 0 && !indices.graphics.has_value()) {
                 indices.graphics = i;
             }
@@ -284,6 +314,20 @@ void Renderer::create_device() {
 
     vkGetDeviceQueue(device_, queue_families_.graphics.value(), 0, &graphics_queue_);
     vkGetDeviceQueue(device_, queue_families_.present.value(), 0, &present_queue_);
+}
+
+void Renderer::create_allocator() {
+    VmaAllocatorCreateInfo info = {};
+    info.instance = instance_;
+    info.physicalDevice = physical_device_;
+    info.device = device_;
+    info.vulkanApiVersion = VK_API_VERSION_1_3;
+
+    VmaVulkanFunctions functions = {};
+    check(vmaImportVulkanFunctionsFromVolk(&info, &functions), "vmaImportVulkanFunctionsFromVolk");
+    info.pVulkanFunctions = &functions;
+
+    check(vmaCreateAllocator(&info, &allocator_), "vmaCreateAllocator");
 }
 
 void Renderer::create_swapchain(VkSwapchainKHR old_swapchain) {
@@ -367,7 +411,7 @@ void Renderer::create_swapchain(VkSwapchainKHR old_swapchain) {
     swapchain_format_ = chosen_format.format;
     swapchain_extent_ = extent;
 
-    trace("swapchain created: currentExtent=" + std::to_string(caps.currentExtent.width) + "x"
+    TRACE("swapchain created: currentExtent=" + std::to_string(caps.currentExtent.width) + "x"
           + std::to_string(caps.currentExtent.height) + (caps.currentExtent.width == UINT32_MAX ? "(MAX)" : "")
           + " chosen=" + std::to_string(extent.width) + "x" + std::to_string(extent.height)
           + " images=" + std::to_string(image_count)
@@ -405,6 +449,10 @@ void Renderer::create_command_buffers() {
     pool_info.queueFamilyIndex = queue_families_.graphics.value();
     check(vkCreateCommandPool(device_, &pool_info, nullptr, &command_pool_), "vkCreateCommandPool");
 
+    allocate_command_buffers();
+}
+
+void Renderer::allocate_command_buffers() {
     command_buffers_.resize(swapchain_images_.size());
     VkCommandBufferAllocateInfo alloc_info = {};
     alloc_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
@@ -440,9 +488,6 @@ void Renderer::create_sync_objects() {
 void Renderer::recreate_swapchain() {
     check(vkDeviceWaitIdle(device_), "vkDeviceWaitIdle");
 
-    vkDestroyCommandPool(device_, command_pool_, nullptr);
-    command_pool_ = VK_NULL_HANDLE;
-    command_buffers_.clear();
     for (VkImageView view : swapchain_views_) {
         vkDestroyImageView(device_, view, nullptr);
     }
@@ -453,7 +498,12 @@ void Renderer::recreate_swapchain() {
     swapchain_ = VK_NULL_HANDLE;
     create_swapchain(old_swapchain);
     create_image_views();
-    create_command_buffers();
+
+    // Resetting the pool releases all previous command buffer allocations;
+    // re-allocate for the possibly changed image count without tearing the
+    // pool down.
+    check(vkResetCommandPool(device_, command_pool_, 0), "vkResetCommandPool");
+    allocate_command_buffers();
 
     if (finished_semaphores_.size() != swapchain_images_.size()) {
         for (VkSemaphore semaphore : finished_semaphores_) {
@@ -551,7 +601,7 @@ void Renderer::draw_frame() {
         return;
     }
     check(result != VK_SUBOPTIMAL_KHR ? result : VK_SUCCESS, "vkAcquireNextImageKHR");
-    trace("acquire image=" + std::to_string(image_index) + " result=" + std::to_string(static_cast<int>(result)));
+    TRACE("acquire image=" + std::to_string(image_index) + " result=" + std::to_string(static_cast<int>(result)));
 
     // Don't render into an image whose previous frame is still in flight.
     if (image_in_flight_[image_index] != VK_NULL_HANDLE) {
@@ -589,7 +639,7 @@ void Renderer::draw_frame() {
     present_info.pImageIndices = &image_index;
 
     result = vkQueuePresentKHR(present_queue_, &present_info);
-    trace("present result=" + std::to_string(static_cast<int>(result)));
+    TRACE("present result=" + std::to_string(static_cast<int>(result)));
     if (result == VK_ERROR_OUT_OF_DATE_KHR || result == VK_SUBOPTIMAL_KHR) {
         recreate_swapchain();
     } else {
