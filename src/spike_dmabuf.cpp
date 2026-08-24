@@ -9,7 +9,6 @@
 #include <poll.h>
 #include <stdexcept>
 #include <string>
-#include <thread>
 #include <vector>
 
 #include <unistd.h>
@@ -75,6 +74,7 @@ struct Framebuffer {
     wp_linux_drm_syncobj_timeline_v1* wl_acquire_timeline = nullptr;
     wp_linux_drm_syncobj_timeline_v1* wl_release_timeline = nullptr;
     uint64_t counter = 0;
+    bool released = false;
 };
 
 class Spike {
@@ -168,8 +168,11 @@ private:
     uint32_t create_syncobj();
     wp_linux_drm_syncobj_timeline_v1* share_syncobj(uint32_t syncobj, int* out_fd);
     void materialize_acquire_point(uint32_t syncobj, uint64_t point, VkFence fence);
-    void wait_release_point(uint32_t syncobj, uint64_t point);
+    bool wait_release_point(uint32_t syncobj, uint64_t point, int64_t timeout_ns);
     void create_framebuffers();
+    void create_dmabuf_resources();
+    void handle_resize();
+    void reap_retired();
     void create_command_buffers();
 
     void present(uint32_t index, float r, float g, float b);
@@ -198,8 +201,11 @@ private:
     bool configured_ = false;
     bool closed_ = false;
     bool frame_due_ = false;
+    bool resize_pending_ = false;
     uint32_t width_ = 0;
     uint32_t height_ = 0;
+    uint32_t pending_width_ = 0;
+    uint32_t pending_height_ = 0;
 
     VkInstance instance_ = VK_NULL_HANDLE;
 #ifdef CODOTAKU_ENABLE_VALIDATION
@@ -214,11 +220,13 @@ private:
     VkDevice device_ = VK_NULL_HANDLE;
     VmaAllocator allocator_ = nullptr;
     VmaPool dmabuf_pool_ = nullptr;
+    VkExportMemoryAllocateInfo dmabuf_export_{};
     VkQueue queue_ = VK_NULL_HANDLE;
 
     VkCommandPool command_pool_ = VK_NULL_HANDLE;
     std::vector<VkCommandBuffer> command_buffers_;
     std::vector<Framebuffer> frames_;
+    std::vector<Framebuffer> retired_;
     uint32_t next_frame_ = 0;
 
     std::chrono::steady_clock::time_point start_ = std::chrono::steady_clock::now();
@@ -234,6 +242,7 @@ void Spike::registry_global(void* data, wl_registry* registry, uint32_t name,
     } else if (std::strcmp(interface, "xdg_wm_base") == 0 && self->wm_base_ == nullptr) {
         self->wm_base_ = static_cast<xdg_wm_base*>(
             wl_registry_bind(registry, name, &xdg_wm_base_interface, 1));
+        xdg_wm_base_add_listener(self->wm_base_, &wm_base_listener_, self);
     } else if (std::strcmp(interface, "zwp_linux_dmabuf_v1") == 0 && self->dmabuf_ == nullptr) {
         self->dmabuf_ = static_cast<zwp_linux_dmabuf_v1*>(
             wl_registry_bind(registry, name, &zwp_linux_dmabuf_v1_interface,
@@ -259,9 +268,14 @@ void Spike::xdg_surface_configure(void* data, xdg_surface* xdg_surface, uint32_t
 void Spike::toplevel_configure(void* data, xdg_toplevel*, int32_t width, int32_t height,
                                wl_array*) {
     auto* self = static_cast<Spike*>(data);
-    if (width > 0 && height > 0 && self->width_ == 0) {
-        self->width_ = static_cast<uint32_t>(width);
-        self->height_ = static_cast<uint32_t>(height);
+    if (width <= 0 || height <= 0) {
+        return;
+    }
+    self->pending_width_ = static_cast<uint32_t>(width);
+    self->pending_height_ = static_cast<uint32_t>(height);
+    if (self->configured_
+        && (self->pending_width_ != self->width_ || self->pending_height_ != self->height_)) {
+        self->resize_pending_ = true;
     }
 }
 
@@ -294,6 +308,20 @@ Spike::Spike() {
 Spike::~Spike() {
     if (device_ != VK_NULL_HANDLE) {
         vkDeviceWaitIdle(device_);
+    }
+    if (!retired_.empty()) {
+        for (auto& fb : retired_) {
+            if (fb.buffer != nullptr) {
+                wl_buffer_destroy(fb.buffer);
+            }
+            if (fb.image != VK_NULL_HANDLE) {
+                vmaDestroyImage(allocator_, fb.image, fb.allocation);
+            }
+            if (fb.dma_buf_fd >= 0) {
+                ::close(fb.dma_buf_fd);
+            }
+        }
+        retired_.clear();
     }
     if (syncobj_surface_ != nullptr) {
         wp_linux_drm_syncobj_surface_v1_destroy(syncobj_surface_);
@@ -403,6 +431,8 @@ void Spike::init_wayland() {
     if (!configured_) {
         throw std::runtime_error("compositor closed window before configure");
     }
+    width_ = pending_width_ ? pending_width_ : 1280;
+    height_ = pending_height_ ? pending_height_ : 720;
     query_default_feedback();
 }
 
@@ -635,9 +665,8 @@ void Spike::create_allocator() {
 void Spike::create_framebuffers() {
     frames_.resize(BUFFER_COUNT);
 
-    VkExportMemoryAllocateInfo export_memory = {};
-    export_memory.sType = VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO;
-    export_memory.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
+    dmabuf_export_.sType = VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO;
+    dmabuf_export_.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
 
     const bool linear = chosen_modifier_ == 0;
 
@@ -654,16 +683,6 @@ void Spike::create_framebuffers() {
     pool_image_info.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     pool_image_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
     pool_image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-
-    VkImageDrmFormatModifierListCreateInfoEXT modifier_list = {};
-    if (!linear) {
-        modifier_list.sType =
-            VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_LIST_CREATE_INFO_EXT;
-        modifier_list.drmFormatModifierCount = 1;
-        modifier_list.pDrmFormatModifiers = &chosen_modifier_;
-        modifier_list.pNext = pool_image_info.pNext;
-        pool_image_info.pNext = &modifier_list;
-    }
 
     VmaAllocationCreateInfo pool_alloc_template = {};
     pool_alloc_template.usage = VMA_MEMORY_USAGE_AUTO;
@@ -683,58 +702,13 @@ void Spike::create_framebuffers() {
 
     VmaPoolCreateInfo pool_info = {};
     pool_info.memoryTypeIndex = mem_type_index;
-    pool_info.pMemoryAllocateNext = &export_memory;
+    pool_info.pMemoryAllocateNext = &dmabuf_export_;
     check(vmaCreatePool(allocator_, &pool_info, &dmabuf_pool_), "vmaCreatePool(dmabuf)");
+
+    create_dmabuf_resources();
 
     for (uint32_t i = 0; i < BUFFER_COUNT; ++i) {
         Framebuffer& fb = frames_[i];
-
-        VkExternalMemoryImageCreateInfo external_image = {};
-        external_image.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO;
-        external_image.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
-
-        VkImageCreateInfo image_info = pool_image_info;
-        image_info.pNext = &external_image;
-        if (!linear) {
-            external_image.pNext = &modifier_list;
-        }
-
-        VmaAllocationCreateInfo alloc_info = {};
-        alloc_info.flags = VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT;
-        alloc_info.pool = dmabuf_pool_;
-
-        check(vmaCreateImage(allocator_, &image_info, &alloc_info, &fb.image, &fb.allocation,
-                             nullptr),
-              "vmaCreateImage(dmabuf)");
-
-        VmaAllocationInfo alloc_result = {};
-        vmaGetAllocationInfo(allocator_, fb.allocation, &alloc_result);
-
-        VkMemoryGetFdInfoKHR get_fd = {};
-        get_fd.sType = VK_STRUCTURE_TYPE_MEMORY_GET_FD_INFO_KHR;
-        get_fd.memory = alloc_result.deviceMemory;
-        get_fd.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
-        check(vkGetMemoryFdKHR(device_, &get_fd, &fb.dma_buf_fd), "vkGetMemoryFdKHR");
-
-        VkImageSubresource subresource = {};
-        subresource.aspectMask = linear ? VK_IMAGE_ASPECT_COLOR_BIT
-                                        : VK_IMAGE_ASPECT_MEMORY_PLANE_0_BIT_EXT;
-        VkSubresourceLayout layout = {};
-        vkGetImageSubresourceLayout(device_, fb.image, &subresource, &layout);
-        fb.pitch = static_cast<uint32_t>(layout.rowPitch);
-
-        zwp_linux_buffer_params_v1* params = zwp_linux_dmabuf_v1_create_params(dmabuf_);
-        zwp_linux_buffer_params_v1_add(params, fb.dma_buf_fd, 0, 0, fb.pitch,
-                                       static_cast<uint32_t>(chosen_modifier_ >> 32),
-                                       static_cast<uint32_t>(chosen_modifier_ & 0xffffffff));
-        fb.buffer = zwp_linux_buffer_params_v1_create_immed(params, width_, height_,
-                                                            DRM_FORMAT_XRGB8888, 0);
-        zwp_linux_buffer_params_v1_destroy(params);
-        if (fb.buffer == nullptr) {
-            throw std::runtime_error("zwp_linux_buffer_params_v1_create_immed failed");
-        }
-        TRACE("image " + std::to_string(i) + ": fd=" + std::to_string(fb.dma_buf_fd)
-              + " pitch=" + std::to_string(fb.pitch));
 
         fb.acquire_syncobj = create_syncobj();
         fb.wl_acquire_timeline = share_syncobj(fb.acquire_syncobj, &fb.acquire_fd);
@@ -780,6 +754,154 @@ void Spike::create_framebuffers() {
     cb_alloc.commandBufferCount = BUFFER_COUNT;
     check(vkAllocateCommandBuffers(device_, &cb_alloc, command_buffers_.data()),
           "vkAllocateCommandBuffers");
+}
+
+void Spike::create_dmabuf_resources() {
+    const bool linear = chosen_modifier_ == 0;
+
+    VkImageDrmFormatModifierListCreateInfoEXT modifier_list = {};
+    if (!linear) {
+        modifier_list.sType =
+            VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_LIST_CREATE_INFO_EXT;
+        modifier_list.drmFormatModifierCount = 1;
+        modifier_list.pDrmFormatModifiers = &chosen_modifier_;
+    }
+
+    for (uint32_t i = 0; i < BUFFER_COUNT; ++i) {
+        Framebuffer& fb = frames_[i];
+
+        VkExternalMemoryImageCreateInfo external_image = {};
+        external_image.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO;
+        external_image.handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
+        if (!linear) {
+            external_image.pNext = &modifier_list;
+        }
+
+        VkImageCreateInfo image_info = {};
+        image_info.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
+        image_info.pNext = &external_image;
+        image_info.imageType = VK_IMAGE_TYPE_2D;
+        image_info.format = VK_FORMAT_B8G8R8A8_UNORM;
+        image_info.extent = {width_, height_, 1};
+        image_info.mipLevels = 1;
+        image_info.arrayLayers = 1;
+        image_info.samples = VK_SAMPLE_COUNT_1_BIT;
+        image_info.tiling = linear ? VK_IMAGE_TILING_LINEAR
+                                   : VK_IMAGE_TILING_DRM_FORMAT_MODIFIER_EXT;
+        image_info.usage = VK_IMAGE_USAGE_TRANSFER_DST_BIT;
+        image_info.sharingMode = VK_SHARING_MODE_EXCLUSIVE;
+        image_info.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+        VmaAllocationCreateInfo alloc_info = {};
+        alloc_info.flags = VMA_ALLOCATION_CREATE_DEDICATED_MEMORY_BIT;
+        alloc_info.pool = dmabuf_pool_;
+
+        check(vmaCreateImage(allocator_, &image_info, &alloc_info, &fb.image, &fb.allocation,
+                             nullptr),
+              "vmaCreateImage(dmabuf)");
+
+        VmaAllocationInfo alloc_result = {};
+        vmaGetAllocationInfo(allocator_, fb.allocation, &alloc_result);
+
+        VkMemoryGetFdInfoKHR get_fd = {};
+        get_fd.sType = VK_STRUCTURE_TYPE_MEMORY_GET_FD_INFO_KHR;
+        get_fd.memory = alloc_result.deviceMemory;
+        get_fd.handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
+        check(vkGetMemoryFdKHR(device_, &get_fd, &fb.dma_buf_fd), "vkGetMemoryFdKHR");
+
+        VkImageSubresource subresource = {};
+        subresource.aspectMask = linear ? VK_IMAGE_ASPECT_COLOR_BIT
+                                        : VK_IMAGE_ASPECT_MEMORY_PLANE_0_BIT_EXT;
+        VkSubresourceLayout layout = {};
+        vkGetImageSubresourceLayout(device_, fb.image, &subresource, &layout);
+        fb.pitch = static_cast<uint32_t>(layout.rowPitch);
+
+        zwp_linux_buffer_params_v1* params = zwp_linux_dmabuf_v1_create_params(dmabuf_);
+        zwp_linux_buffer_params_v1_add(params, fb.dma_buf_fd, 0, 0, fb.pitch,
+                                       static_cast<uint32_t>(chosen_modifier_ >> 32),
+                                       static_cast<uint32_t>(chosen_modifier_ & 0xffffffff));
+        fb.buffer = zwp_linux_buffer_params_v1_create_immed(params, width_, height_,
+                                                            DRM_FORMAT_XRGB8888, 0);
+        zwp_linux_buffer_params_v1_destroy(params);
+        if (fb.buffer == nullptr) {
+            throw std::runtime_error("zwp_linux_buffer_params_v1_create_immed failed");
+        }
+        TRACE("image " + std::to_string(i) + ": fd=" + std::to_string(fb.dma_buf_fd)
+              + " pitch=" + std::to_string(fb.pitch) + " " + std::to_string(width_) + "x"
+              + std::to_string(height_));
+    }
+}
+
+void Spike::handle_resize() {
+    TRACE("resize: " + std::to_string(width_) + "x" + std::to_string(height_) + " -> "
+              + std::to_string(pending_width_) + "x" + std::to_string(pending_height_));
+    check(vkDeviceWaitIdle(device_), "vkDeviceWaitIdle(resize)");
+
+    std::vector<Framebuffer> fresh(BUFFER_COUNT);
+    for (uint32_t i = 0; i < BUFFER_COUNT; ++i) {
+        Framebuffer& old = frames_[i];
+        Framebuffer& dst = fresh[i];
+
+        dst.acquire_syncobj = old.acquire_syncobj;
+        dst.release_syncobj = old.release_syncobj;
+        dst.acquire_fd = old.acquire_fd;
+        dst.release_fd = old.release_fd;
+        dst.wl_acquire_timeline = old.wl_acquire_timeline;
+        dst.wl_release_timeline = old.wl_release_timeline;
+        dst.counter = old.counter;
+
+        Framebuffer retired;
+        retired.image = old.image;
+        retired.allocation = old.allocation;
+        retired.dma_buf_fd = old.dma_buf_fd;
+        retired.pitch = old.pitch;
+        retired.buffer = old.buffer;
+        retired.release_syncobj = old.release_syncobj;
+        retired.counter = old.counter;
+        retired_.push_back(retired);
+
+        old.image = VK_NULL_HANDLE;
+        old.allocation = nullptr;
+        old.dma_buf_fd = -1;
+        old.pitch = 0;
+        old.buffer = nullptr;
+    }
+    width_ = pending_width_;
+    height_ = pending_height_;
+    resize_pending_ = false;
+
+    frames_ = std::move(fresh);
+    create_dmabuf_resources();
+}
+
+void Spike::reap_retired() {
+    constexpr int64_t wait_ns = 100LL * 1000LL * 1000LL;
+    for (auto it = retired_.begin(); it != retired_.end();) {
+        Framebuffer& fb = *it;
+        bool ready = true;
+        if (!fb.released && fb.counter > 0) {
+            ready = wait_release_point(fb.release_syncobj, fb.counter, wait_ns);
+            fb.released = ready;
+        }
+        if (!ready) {
+            ++it;
+            continue;
+        }
+        if (fb.buffer != nullptr) {
+            wl_buffer_destroy(fb.buffer);
+            fb.buffer = nullptr;
+        }
+        if (fb.image != VK_NULL_HANDLE) {
+            vmaDestroyImage(allocator_, fb.image, fb.allocation);
+            fb.image = VK_NULL_HANDLE;
+            fb.allocation = nullptr;
+        }
+        if (fb.dma_buf_fd >= 0) {
+            ::close(fb.dma_buf_fd);
+            fb.dma_buf_fd = -1;
+        }
+        it = retired_.erase(it);
+    }
 }
 
 void Spike::init_vulkan() {
@@ -843,13 +965,14 @@ void Spike::materialize_acquire_point(uint32_t syncobj, uint64_t point, VkFence 
     ::close(sync_fd);
 }
 
-void Spike::wait_release_point(uint32_t syncobj, uint64_t point) {
-    constexpr int64_t timeout_ns = 5LL * 1000LL * 1000LL * 1000LL;
+bool Spike::wait_release_point(uint32_t syncobj, uint64_t point, int64_t timeout_ns) {
     uint32_t first = 0;
     if (drmSyncobjTimelineWait(drm_fd_, &syncobj, &point, 1, timeout_ns, 0, &first) != 0) {
-        throw std::runtime_error("drmSyncobjTimelineWait on release point timed out/failed");
+        TRACE("release point " + std::to_string(point) + " not signaled within timeout");
+        return false;
     }
     TRACE("release point " + std::to_string(point) + " signaled");
+    return true;
 }
 
 void Spike::feedback_format_table(void* data, zwp_linux_dmabuf_feedback_v1*, int32_t fd,
@@ -963,8 +1086,10 @@ void Spike::record_clear(uint32_t index, float r, float g, float b) {
 void Spike::present(uint32_t index, float r, float g, float b) {
     Framebuffer& fb = frames_[index];
 
-    if (fb.counter > 0) {
-        wait_release_point(fb.release_syncobj, fb.counter);
+    if (fb.counter > 0
+        && !wait_release_point(fb.release_syncobj, fb.counter,
+                               5LL * 1000LL * 1000LL * 1000LL)) {
+        throw std::runtime_error("timed out waiting for release point");
     }
 
     const uint64_t point = fb.counter + 1;
@@ -1015,19 +1140,49 @@ void Spike::run() {
     }
     present(next_frame_, rgb[0], rgb[1], rgb[2]);
 
+    const bool resize_test = std::getenv("CODOTAKU_RESIZE_TEST") != nullptr;
+    int resize_test_step = 0;
+
     while (!closed_) {
         poll_and_dispatch();
-        if (!frame_due_) {
+        if (!frame_due_ && !resize_pending_) {
             continue;
+        }
+        if (resize_pending_) {
+            handle_resize();
+        }
+        frame_due_ = false;
+        if (frame_callback_ == nullptr) {
+            arm_frame();
         }
         const float seconds =
             std::chrono::duration<float>(std::chrono::steady_clock::now() - start_).count();
         hsv_to_rgb(std::fmod(seconds * 0.05f, 1.0f), 0.65f, 1.0f, rgb);
-        if (frame_callback_ == nullptr) {
-            arm_frame();
-        }
         present(next_frame_, rgb[0], rgb[1], rgb[2]);
-        frame_due_ = false;
+        if (!retired_.empty()) {
+            reap_retired();
+        }
+
+        if (resize_test) {
+            auto step_at = [&](int step) { return seconds >= static_cast<float>(step * 4); };
+            if (resize_test_step == 0 && step_at(1)) {
+                xdg_toplevel_set_fullscreen(toplevel_, nullptr);
+                wl_display_flush(display_);
+                ++resize_test_step;
+            } else if (resize_test_step == 1 && step_at(3)) {
+                xdg_toplevel_unset_fullscreen(toplevel_);
+                wl_display_flush(display_);
+                ++resize_test_step;
+            } else if (resize_test_step == 2 && step_at(5)) {
+                xdg_toplevel_set_fullscreen(toplevel_, nullptr);
+                wl_display_flush(display_);
+                ++resize_test_step;
+            } else if (resize_test_step == 3 && step_at(7)) {
+                xdg_toplevel_unset_fullscreen(toplevel_);
+                wl_display_flush(display_);
+                ++resize_test_step;
+            }
+        }
     }
     check(vkDeviceWaitIdle(device_), "vkDeviceWaitIdle");
 }
