@@ -7,3 +7,6 @@ compile_commands.json
 
 # Local-only CMake presets
 CMakeUserPresets.json
+
+# Vulkan profiles dumped by tooling
+VP_VULKANINFO_*.json
