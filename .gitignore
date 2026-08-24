@@ -1,0 +1,9 @@
+# Build directories
+/build/
+
+# Tooling
+.cache/
+compile_commands.json
+
+# Local-only CMake presets
+CMakeUserPresets.json
