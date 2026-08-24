@@ -55,20 +55,11 @@ endforeach()
 
 add_executable(codotaku-media
     src/main.cpp
-    src/platform_wayland.cpp
-    src/renderer_vulkan.cpp
     src/vma_impl.cpp
     "${VOLK_SOURCE}"
     ${GENERATED_SOURCES}
 )
 set_source_files_properties(src/vma_impl.cpp PROPERTIES COMPILE_OPTIONS "-w")
-
-add_executable(spike-dmabuf
-    src/spike_dmabuf.cpp
-    src/vma_impl.cpp
-    "${VOLK_SOURCE}"
-    ${GENERATED_SOURCES}
-)
 
 function(codotaku_configure_target target)
     target_include_directories("${target}" PRIVATE
@@ -90,5 +81,4 @@ function(codotaku_configure_target target)
 endfunction()
 
 codotaku_configure_target(codotaku-media)
-codotaku_configure_target(spike-dmabuf)
-target_link_libraries(spike-dmabuf PRIVATE PkgConfig::LIBDRM)
+target_link_libraries(codotaku-media PRIVATE PkgConfig::LIBDRM)
