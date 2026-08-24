@@ -36,6 +36,8 @@ where the swapchain path has a history of blocking and busy-spin issues.
 Images are allocated by you-the-library partnership with VMA as
 modifier-decorated, dmabuf-exported `VkImage`s that the display controller can
 scan out directly — the GPU writes the exact memory KMS displays. Zero copies.
+Server-side decorations are requested by default (`prefer_server_decoration`)
+and silently skipped when the compositor lacks xdg-decoration or overrides it.
 
 ## Requirements
 

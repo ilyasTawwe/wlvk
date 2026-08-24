@@ -36,6 +36,10 @@ void Callbacks::registry_global(void* data, wl_registry* registry, uint32_t name
         self->presentation_ = static_cast<wp_presentation*>(
             wl_registry_bind(registry, name, &wp_presentation_interface,
                              version < 1 ? version : 1));
+    } else if (std::strcmp(interface, "zxdg_decoration_manager_v1") == 0
+               && self->decoration_manager_ == nullptr && self->config_.prefer_server_decoration) {
+        self->decoration_manager_ = static_cast<zxdg_decoration_manager_v1*>(
+            wl_registry_bind(registry, name, &zxdg_decoration_manager_v1_interface, 1));
     }
 }
 
@@ -72,6 +76,10 @@ void Callbacks::frame_done(void* data, wl_callback* callback, uint32_t) {
     wl_callback_destroy(callback);
     self->frame_callback_ = nullptr;
     self->frame_due_ = true;
+}
+
+void Callbacks::decoration_configure(void* data, zxdg_toplevel_decoration_v1*, uint32_t mode) {
+    static_cast<Impl*>(data)->decoration_mode_ = mode;
 }
 
 // ---- lifecycle ----
@@ -150,6 +158,12 @@ Impl::~Impl() {
     if (toplevel_ != nullptr) {
         xdg_toplevel_destroy(toplevel_);
     }
+    if (decoration_ != nullptr) {
+        zxdg_toplevel_decoration_v1_destroy(decoration_);
+    }
+    if (decoration_manager_ != nullptr) {
+        zxdg_decoration_manager_v1_destroy(decoration_manager_);
+    }
     if (xdg_surface_ != nullptr) {
         xdg_surface_destroy(xdg_surface_);
     }
@@ -210,6 +224,13 @@ void Impl::create_window() {
     toplevel_ = xdg_surface_get_toplevel(xdg_surface_);
     xdg_surface_add_listener(xdg_surface_, &xdg_surface_listener_, this);
     xdg_toplevel_add_listener(toplevel_, &toplevel_listener_, this);
+    if (decoration_manager_ != nullptr) {
+        decoration_ = zxdg_decoration_manager_v1_get_toplevel_decoration(
+            decoration_manager_, toplevel_);
+        zxdg_toplevel_decoration_v1_add_listener(decoration_, &decoration_listener_, this);
+        zxdg_toplevel_decoration_v1_set_mode(
+            decoration_, ZXDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE);
+    }
     xdg_toplevel_set_title(toplevel_, config_.title);
     xdg_toplevel_set_app_id(toplevel_, config_.app_id);
     wl_surface_commit(surface_);

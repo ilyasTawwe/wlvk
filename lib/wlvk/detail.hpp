@@ -14,6 +14,7 @@
 #include "linux-dmabuf-v1-client-protocol.h"
 #include "presentation-time-client-protocol.h"
 #include "linux-drm-syncobj-v1-client-protocol.h"
+#include "xdg-decoration-unstable-v1-client-protocol.h"
 
 namespace wlvk::detail {
 
@@ -75,6 +76,7 @@ struct Callbacks {
     static void toplevel_configure_bounds(void*, xdg_toplevel*, int32_t, int32_t) {}
     static void toplevel_wm_capabilities(void*, xdg_toplevel*, wl_array*) {}
     static void frame_done(void* data, wl_callback* callback, uint32_t);
+    static void decoration_configure(void* data, zxdg_toplevel_decoration_v1*, uint32_t mode);
     static void dmabuf_format(void*, zwp_linux_dmabuf_v1*, uint32_t) {}
     static void dmabuf_modifier(void*, zwp_linux_dmabuf_v1*, uint32_t, uint32_t, uint32_t) {}
 
@@ -162,6 +164,9 @@ struct Impl : Callbacks {
     wp_linux_drm_syncobj_surface_v1* syncobj_surface_ = nullptr;
     zwp_linux_dmabuf_feedback_v1* default_feedback_ = nullptr;
     wp_presentation* presentation_ = nullptr;
+    zxdg_decoration_manager_v1* decoration_manager_ = nullptr;
+    zxdg_toplevel_decoration_v1* decoration_ = nullptr;
+    uint32_t decoration_mode_ = ZXDG_TOPLEVEL_DECORATION_V1_MODE_CLIENT_SIDE;
 
     // dmabuf feedback state
     std::vector<uint8_t> format_table_;
@@ -243,6 +248,9 @@ struct Impl : Callbacks {
         .sync_output = &Callbacks::presentation_sync_output,
         .presented = &Callbacks::presentation_presented,
         .discarded = &Callbacks::presentation_discarded,
+    };
+    static constexpr zxdg_toplevel_decoration_v1_listener decoration_listener_ = {
+        .configure = &Callbacks::decoration_configure,
     };
 };
 

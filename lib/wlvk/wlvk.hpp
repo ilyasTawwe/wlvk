@@ -88,6 +88,11 @@ struct WindowConfig {
     uint32_t api_version = VK_API_VERSION_1_4;
     bool enable_validation = false;  // VK_LAYER_KHRONOS_validation + debug utils
 
+    /// Request compositor-provided decorations (titlebar/borders) for the
+    /// toplevel via xdg-decoration. Ignored when the compositor does not
+    /// advertise the protocol, or when it overrides the mode (e.g. tiling).
+    bool prefer_server_decoration = true;
+
     /// Usage flags for the per-frame dmabuf images. Capability filtering of
     /// modifiers accounts for these. TRANSFER_DST-only keeps the default
     /// modifier choice maximally permissive; adding usages may narrow it.
