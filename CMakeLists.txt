@@ -17,5 +17,5 @@ option(WLVK_BUILD_EXAMPLES "Build wlvk examples" ON)
 add_subdirectory(lib/wlvk)
 
 if(WLVK_BUILD_EXAMPLES)
-    add_subdirectory(examples/clear)
+    add_subdirectory(examples)
 endif()

@@ -127,6 +127,9 @@ thing is deliberately small enough to read.
 
 ## Example
 
+`examples/static/` is the hello-world: a static cornflower-blue clear using
+nothing but library defaults — no configuration, no callbacks, no output.
+
 `examples/clear/` renders a hue-cycling clear color through the full pipeline.
 Environment knobs: `WLVK_VALIDATION=1` enables the validation layer,
 `WLVK_TRACE=1` enables internal tracing, `WLVK_PRESENT_STATS=1` prints per-frame
