@@ -1139,7 +1139,9 @@ void Application::present(uint32_t index, float r, float g, float b) {
     if (fb.counter > 0
         && !wait_release_point(fb.release_syncobj, fb.counter,
                                5LL * 1000LL * 1000LL * 1000LL)) {
-        throw std::runtime_error("timed out waiting for release point");
+        TRACE("deferring frame; release point " + std::to_string(fb.counter)
+              + " not ready after resize or latch lag");
+        return;
     }
 
     const uint64_t point = fb.counter + 1;
