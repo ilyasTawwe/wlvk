@@ -1,0 +1,5 @@
+add_executable(wlvk-video main.cpp)
+target_link_libraries(wlvk-video PRIVATE wlvk PkgConfig::FFMPEG)
+if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+    target_compile_options(wlvk-video PRIVATE -Wall -Wextra -Wpedantic)
+endif()

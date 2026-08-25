@@ -132,6 +132,10 @@ thing is deliberately small enough to read.
 
 `examples/static/` is the hello-world: a static cornflower-blue clear using
 nothing but library defaults — no configuration, no callbacks, no output.
+Built only when FFmpeg development libraries are present:
+`examples/video/` software-decodes any file FFmpeg supports and blits frames
+through a staging buffer into the scanout images (`wlvk-video <file>`,
+plays at vsync rate — no timing logic by design).
 
 `examples/clear/` renders a hue-cycling clear color through the full pipeline.
 Environment knobs: `WLVK_VALIDATION=1` enables the validation layer,

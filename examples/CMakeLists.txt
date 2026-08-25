@@ -1,2 +1,10 @@
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(FFMPEG IMPORTED_TARGET libavformat libavcodec libswscale libavutil)
+
 add_subdirectory(clear)
 add_subdirectory(static)
+if(FFMPEG_FOUND)
+    add_subdirectory(video)
+else()
+    message(STATUS "FFmpeg development libraries not found - skipping wlvk-video example")
+endif()
