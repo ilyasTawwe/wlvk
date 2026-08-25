@@ -18,6 +18,7 @@
 #include <volk.h>
 #include <vk_mem_alloc.h>
 
+#include <array>
 #include <cstdint>
 #include <functional>
 #include <memory>
@@ -142,6 +143,12 @@ struct Stats {
     double max_gap_ms = 0.0;
 };
 
+struct PlaneInfo {
+    int fd = -1;
+    uint32_t offset = 0;
+    uint32_t pitch = 0;
+};
+
 /// A writable frame handed out by wait_frame(). Valid until the next
 /// wait_frame() call (or until on_resize fires). All handles are
 /// library-owned unless noted.
@@ -149,13 +156,11 @@ struct Frame {
     uint32_t index = 0;
     VkFormat format = VK_FORMAT_UNDEFINED;
     VkImage image = VK_NULL_HANDLE;   // write this
-    uint32_t pitch = 0;               // bytes per row
+    uint32_t pitch = 0;               // bytes per row (plane 0)
     uint64_t drm_modifier = 0;
     int dma_buf_fd = -1;              // borrowed; never close
-    /// Exportable (VK_EXTERNAL_FENCE_HANDLE_TYPE_SYNC_FD_BIT) fence.
-    /// Pass it as the signal fence of the vkQueueSubmit(s) that render this
-    /// frame, then call present(). Do not reset, destroy, wait on it, or
-    /// reuse it otherwise.
+    uint32_t plane_count = 1;
+    std::array<PlaneInfo, 4> planes = {};
     VkFence render_fence = VK_NULL_HANDLE;
 };
 

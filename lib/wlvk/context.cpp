@@ -37,6 +37,10 @@ VkFormat vk_format_for_fourcc(uint32_t fourcc) {
     case DRM_FORMAT_XBGR8888:
     case DRM_FORMAT_ABGR8888:
         return VK_FORMAT_R8G8B8A8_UNORM;
+    case DRM_FORMAT_NV12:
+        return VK_FORMAT_G8_B8R8_2PLANE_420_UNORM;
+    case DRM_FORMAT_P010:
+        return VK_FORMAT_G10X6_B10X6R10X6_2PLANE_420_UNORM_3PACK16;
     default:
         return VK_FORMAT_UNDEFINED;
     }
@@ -557,10 +561,8 @@ void Callbacks::feedback_tranche_formats(void* data, zwp_linux_dmabuf_feedback_v
 
 void Callbacks::feedback_tranche_done(void* data, zwp_linux_dmabuf_feedback_v1*) {
     auto* self = static_cast<Impl*>(data);
-    if (self->offers_.empty()) {
-        for (const auto& [fourcc, modifier] : self->tranche_candidates_) {
-            self->offers_.push_back({fourcc, vk_format_for_fourcc(fourcc), modifier});
-        }
+    for (const auto& [fourcc, modifier] : self->tranche_candidates_) {
+        self->offers_.push_back({fourcc, vk_format_for_fourcc(fourcc), modifier});
     }
     self->tranche_candidates_.clear();
 }

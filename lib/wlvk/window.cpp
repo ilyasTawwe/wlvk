@@ -441,16 +441,70 @@ void Impl::create_dmabuf_resources() {
         check_vk(vkGetMemoryFdKHR(device_, &get_fd, &fb.dma_buf_fd), "vkGetMemoryFdKHR");
 
         VkImageSubresource subresource = {};
-        subresource.aspectMask = linear ? VK_IMAGE_ASPECT_COLOR_BIT
-                                        : VK_IMAGE_ASPECT_MEMORY_PLANE_0_BIT_EXT;
+        subresource.aspectMask = linear
+            ? static_cast<VkImageAspectFlags>(VK_IMAGE_ASPECT_COLOR_BIT)
+            : static_cast<VkImageAspectFlags>(VK_IMAGE_ASPECT_MEMORY_PLANE_0_BIT_EXT);
         VkSubresourceLayout layout = {};
         vkGetImageSubresourceLayout(device_, fb.image, &subresource, &layout);
         fb.pitch = static_cast<uint32_t>(layout.rowPitch);
 
+        // Query plane count for multi-plane formats.
+        uint32_t plane_count = 1;
+        if (!linear) {
+            VkImageDrmFormatModifierPropertiesEXT modifier_props = {};
+            modifier_props.sType =
+                VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_PROPERTIES_EXT;
+            check_vk(vkGetImageDrmFormatModifierPropertiesEXT(device_, fb.image,
+                                                              &modifier_props),
+                     "vkGetImageDrmFormatModifierPropertiesEXT");
+
+            VkDrmFormatModifierPropertiesEXT drm_props = {};
+            VkDrmFormatModifierPropertiesListEXT drm_list = {};
+            drm_list.sType =
+                VK_STRUCTURE_TYPE_DRM_FORMAT_MODIFIER_PROPERTIES_LIST_EXT;
+            drm_list.drmFormatModifierCount = 1;
+            drm_list.pDrmFormatModifierProperties = &drm_props;
+
+            VkFormatProperties2 fmt_props = {};
+            fmt_props.sType = VK_STRUCTURE_TYPE_FORMAT_PROPERTIES_2;
+            fmt_props.pNext = &drm_list;
+
+            vkGetPhysicalDeviceFormatProperties2(physical_device_, chosen_vk_format_,
+                                                  &fmt_props);
+            if (drm_props.drmFormatModifierPlaneCount > 0) {
+                plane_count = drm_props.drmFormatModifierPlaneCount;
+            }
+        }
+
+        fb.plane_count = plane_count;
+
+        static constexpr VkImageAspectFlags kPlaneAspects[] = {
+            VK_IMAGE_ASPECT_MEMORY_PLANE_0_BIT_EXT,
+            VK_IMAGE_ASPECT_MEMORY_PLANE_1_BIT_EXT,
+            VK_IMAGE_ASPECT_MEMORY_PLANE_2_BIT_EXT,
+            VK_IMAGE_ASPECT_MEMORY_PLANE_3_BIT_EXT,
+        };
+
+        for (uint32_t p = 0; p < plane_count; ++p) {
+            VkImageSubresource plane_sub = {};
+            plane_sub.aspectMask = linear ? static_cast<VkImageAspectFlags>(VK_IMAGE_ASPECT_COLOR_BIT)
+                                          : kPlaneAspects[p];
+            VkSubresourceLayout plane_layout = {};
+            vkGetImageSubresourceLayout(device_, fb.image, &plane_sub, &plane_layout);
+
+            fb.planes[p].fd = fb.dma_buf_fd;
+            fb.planes[p].offset = static_cast<uint32_t>(plane_layout.offset);
+            fb.planes[p].pitch = static_cast<uint32_t>(plane_layout.rowPitch);
+        }
+
         zwp_linux_buffer_params_v1* params = zwp_linux_dmabuf_v1_create_params(dmabuf_);
-        zwp_linux_buffer_params_v1_add(params, fb.dma_buf_fd, 0, 0, fb.pitch,
-                                       static_cast<uint32_t>(chosen_modifier_ >> 32),
-                                       static_cast<uint32_t>(chosen_modifier_ & 0xffffffff));
+        for (uint32_t p = 0; p < plane_count; ++p) {
+            zwp_linux_buffer_params_v1_add(
+                params, fb.planes[p].fd, fb.planes[p].offset, p,
+                fb.planes[p].pitch,
+                static_cast<uint32_t>(chosen_modifier_ >> 32),
+                static_cast<uint32_t>(chosen_modifier_ & 0xffffffff));
+        }
         fb.buffer = zwp_linux_buffer_params_v1_create_immed(params, width_, height_,
                                                             chosen_fourcc_, 0);
         zwp_linux_buffer_params_v1_destroy(params);
@@ -459,7 +513,9 @@ void Impl::create_dmabuf_resources() {
         }
         WLVK_TRACE(*this, "image " + std::to_string(i) + ": fd="
                               + std::to_string(fb.dma_buf_fd) + " pitch="
-                              + std::to_string(fb.pitch) + " " + std::to_string(width_) + "x"
+                              + std::to_string(fb.pitch) + " planes="
+                              + std::to_string(plane_count) + " "
+                              + std::to_string(width_) + "x"
                               + std::to_string(height_));
     }
 }
@@ -491,6 +547,8 @@ void Impl::handle_resize() {
         retired_fb.allocation = old.allocation;
         retired_fb.dma_buf_fd = old.dma_buf_fd;
         retired_fb.pitch = old.pitch;
+        retired_fb.plane_count = old.plane_count;
+        retired_fb.planes = old.planes;
         retired_fb.buffer = old.buffer;
         retired_fb.release_syncobj = old.release_syncobj;
         retired_fb.counter = old.counter;
@@ -595,6 +653,8 @@ bool Impl::next_frame(Frame& out) {
     out.drm_modifier = chosen_modifier_;
     out.dma_buf_fd = fb.dma_buf_fd;
     out.render_fence = fb.render_fence;
+    out.plane_count = fb.plane_count;
+    out.planes = fb.planes;
     return true;
 }
 

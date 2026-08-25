@@ -7,6 +7,7 @@
 #include <xf86drm.h>
 #include <drm_fourcc.h>
 
+#include <array>
 #include <chrono>
 #include <string>
 
@@ -33,6 +34,8 @@ struct FrameSlot {
     VmaAllocation allocation = nullptr;
     int dma_buf_fd = -1;
     uint32_t pitch = 0;
+    uint32_t plane_count = 1;
+    std::array<PlaneInfo, 4> planes = {};
     wl_buffer* buffer = nullptr;
     uint32_t acquire_syncobj = 0;
     uint32_t release_syncobj = 0;
