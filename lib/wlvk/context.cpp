@@ -358,7 +358,12 @@ void Impl::create_device() {
     if (budget_ext_) {
         extensions.push_back(VK_EXT_MEMORY_BUDGET_EXTENSION_NAME);
     }
-    void* pnext_head = nullptr;
+    // Dynamic rendering is the baseline path for drawing into scanout images;
+    // enable it up front so renderPass-less pipelines are always legal.
+    VkPhysicalDeviceDynamicRenderingFeatures dynamic_features = {};
+    dynamic_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES;
+    dynamic_features.dynamicRendering = VK_TRUE;
+    void* pnext_head = &dynamic_features;
     DeviceBuilder builder(physical_device_, &extensions, &pnext_head);
     if (config_.configure_device != nullptr) {
         config_.configure_device(builder);
